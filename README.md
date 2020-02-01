@@ -8,7 +8,9 @@ Easily extract types and metadata from IL2CPP binaries.
 * Supports applications created with Unity 5.3.0 onwards (full IL2CPP version table below)
 * Support for assemblies, classes, methods, constructors, fields, properties, enumerations, events, interfaces, structs, pointers, references, attributes, nested types, generic types, generic methods, generic constraints, default field values and default method parameter values
 * C# syntactic sugar for CTS value types, compiler-generated types, delegates, extension methods, operator overloading, indexers, user-defined conversion operators, explicit interface instantiations, finalizers, nullable types, unsafe contexts, fixed-size arrays, variable length argument lists, method hiding and escaped strings
-* Partition C# code output by namespace, assembly, class or single file; sort by index or type name; output flat or nested folder hierarchy. Each file includes the necessary `using` directives. Scope and type name conflicts are resolved automatically to produce code that compiles.
+* Partition C# code output by namespace, assembly, class, full tree or single file; sort by index or type name; output flat or nested folder hierarchy. Each file includes the necessary `using` directives. Scope and type name conflicts are resolved automatically to produce code that compiles.
+* **NEW!** Create Visual Studio solutions directly from IL2CPP files
+* **NEW!** Create IDA Python scripts to populate symbol and function information
 * Static symbol table scanning for ELF and Mach-O binaries if present
 * Dynamic symbol table scanning for ELF binaries if present
 * Symbol relocation handling for ELF binaries
@@ -40,12 +42,17 @@ File format and architecture are automatically detected.
   -i, --bin                   Required. (Default: libil2cpp.so) IL2CPP binary file input
   -m, --metadata              Required. (Default: global-metadata.dat) IL2CPP metadata file input
   -c, --cs-out                (Default: types.cs) C# output file (when using single-file layout) or path (when using per namespace, assembly or class layout)
+  -p, --py-out                (Default: ida.py) IDA Python script output file
   -e, --exclude-namespaces    (Default: System Unity UnityEngine UnityEngineInternal Mono Microsoft.Win32) Comma-separated list of namespaces to suppress in C# output, or 'none' to include all namespaces
   -l, --layout                (Default: single) Partitioning of C# output ('single' = single file, 'namespace' = one file per namespace in folders, 'assembly' = one file per assembly, 'class' = one file per class in namespace folders, 'tree' = one file per class in assembly and namespace folders)
   -s, --sort                  (Default: index) Sort order of type definitions in C# output ('index' = by type definition index, 'name' = by type name). No effect when using file-per-class or tree layout
   -f, --flatten               Flatten the namespace hierarchy into a single folder rather than using per-namespace subfolders. Only used when layout is per-namespace or per-class. Ignored for tree layout
   -n, --suppress-metadata     Diff tidying: suppress method pointers, field offsets and type indices from C# output. Useful for comparing two versions of a binary for changes with a diff tool
-  -k, --must-compile          Compilation tidying: try really hard to make code that compiles. Suppress generation of code for items with CompilerGenerated attribute. Comment out attributes without parameterless constructors or all-optional constructor arguments. Don't emit add/remove/raise on events. Specify AttributeTargets.All on classes with AttributeUsage attribute. Force auto-properties to have get accessors. Force regular properties to have bodies.
+  -k, --must-compile          Compilation tidying: try really hard to make code that compiles. Suppress generation of code for items with CompilerGenerated attribute. Comment out attributes without parameterless constructors or all-optional constructor arguments. Don't emit add/remove/raise on events. Specify AttributeTargets.All on classes with AttributeUsage attribute. Force auto-properties to have get accessors. Force regular properties to have bodies. Suppress global::Locale classes.
+      --separate-attributes   Place assembly-level attributes in their own AssemblyInfo.cs files. Only used when layout is per-assembly or tree
+  -j, --project               Create a Visual Studio solution and projects. Implies --layout tree, --must-compile and --separate-attributes
+      --unity-path            (Default: C:\Program Files\Unity\Hub\Editor\*) Path to Unity editor (when using --project). Wildcards select last matching folder in alphanumeric order
+      --unity-assemblies      (Default: C:\Program Files\Unity\Hub\Editor\*\Editor\Data\Resources\PackageManager\ProjectTemplates\libcache\com.unity.template.3d-*\ScriptAssemblies) Path to Unity script assemblies (when using --project). Wildcards select last matching folder in alphanumeric order
 ```
 
 Defaults if not specified:
@@ -59,11 +66,13 @@ To exclude types from certain namespaces from being generated in the C# source f
 ```
 System
 Mono
+Microsoft.Win32
 Unity
+UnityEditor
 UnityEngine
 UnityEngineInternal
-Microsoft.Win32
 AOT
+JetBrains.Annotations
 ```
 
 Providing an argument to `--exclude-namespaces` will override the default list. To output all namespaces, use `--exclude-namespaces=none`.
@@ -71,6 +80,26 @@ Providing an argument to `--exclude-namespaces` will override the default list. 
 By default, types and fields declared with the `System.Runtime.CompilerServices.CompilerGeneratedAttribute` attribute will be suppresssed from the C# code output. The attribute itself will be suppressed from property getters and setters. This is useful if you would like to be able to compile the output code. To include these constructs in the output, use `--no-suppress-cg`.
 
 For Apple Universal Binaries, multiple output files will be generated, with each filename besides the first suffixed by the index of the image in the Universal Binary. Unsupported images will be skipped.
+
+### Creating a Visual Studio solution
+
+Il2CppInspector can create a complete Visual Studio workspace with a solution (.sln) file, project (.csproj) files and assembly-namespace-class tree-like folder structure. Each project creates a single assembly.
+
+Use the `--project` flag to generate a solution workspace.
+
+In order for Il2CppInspector to be able to create .csproj files which contain the correct Unity assembly references, you must provide the path to an installed Unity editor and a project template or `ScriptAssemblies` folder of an existing Unity project.
+
+NOTE: The default settings will select the latest installed version of Unity and the latest installed version of the default 3D project template, if they have been installed in the default location.
+
+Typical Unity editor location (specified with `--unity-path`): *C:\Program Files\Unity\Hub\Editor\20xx.y.z*
+
+Typical Unity project template location (specified with `--unity-assemblies`): *C:\Program Files\Unity\Hub\Editor\20xx.y.z\Editor\Data\Resources\PackageManager\ProjectTemplates\libcache\\\<name-of-template>*
+
+Typical Unity script assemblies location in existing project (specified with `--unity-aseemblies`): *X:\MyProject\Library\ScriptAssemblies*
+
+Replace *x*, *y* and *z* with your Unity version number. Replace *\<name-of-template\>* with the desired template.
+
+NOTE: You can use the asterisk wildcard (*) one or more times when specifying these paths. Il2CppInspector will select the last matching folder in alphanumeric order. This is useful if you have multiple side-by-side Unity installs and wish to always select the latest version or template.
 
 ### Running tests
 

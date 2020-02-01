@@ -1,4 +1,8 @@
-﻿using System;
+﻿// Copyright (c) 2019-2020 Carter Bush - https://github.com/carterbush
+// Copyright (c) 2020 Katy Coe - http://www.djkaty.com - https://github.com/djkaty
+// All rights reserved
+
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
@@ -9,34 +13,43 @@ namespace Il2CppInspector
 {
     public class Il2CppIDAScriptDumper
     {
-        private Il2CppModel model;
+        private readonly Dictionary<MetadataUsageType, string> usagePrefixes = new Dictionary<MetadataUsageType, string> {
+            [MetadataUsageType.TypeInfo] = "Class",
+            [MetadataUsageType.Type] = "Class",
+            [MetadataUsageType.MethodDef] = "Method",
+            [MetadataUsageType.FieldInfo] = "Field",
+            [MetadataUsageType.StringLiteral] = "String",
+            [MetadataUsageType.MethodRef] = "Method"
+        };
+
+        private readonly Il2CppModel model;
+        private StreamWriter writer;
 
         public Il2CppIDAScriptDumper(Il2CppModel model) => this.model = model;
 
-        #region Writing
-
         public void WriteScriptToFile(string outputFile) {
-            using (var fs = new FileStream(outputFile, FileMode.Create))
-            using (var sw = new StreamWriter(fs, Encoding.UTF8)) {
-                writeSectionHeader(sw, "Preamble");
-                writePreamble(sw);
+            using var fs = new FileStream(outputFile, FileMode.Create);
+            writer = new StreamWriter(fs, Encoding.UTF8);
 
-                writeSectionHeader(sw, "Methods");
-                writeMethods(sw, this.model.Types);
+            writeSectionHeader("Preamble");
+            writePreamble();
 
-                writeSectionHeader(sw, "Usages");
-                writeUsages(sw, this.model);
-            }
+            writeSectionHeader("Methods");
+            writeMethods();
+
+            writeSectionHeader("Usages");
+            writeUsages();
+
+            writer.Close();
         }
 
-        private static void writePreamble(StreamWriter writer) {
-            writeLines(writer,
+        private void writePreamble() {
+            writeLines(
 @"#encoding: utf-8
 import idaapi
 
 def SetString(addr, comm):
-  global index
-  name = 'StringLiteral_' + str(index)
+  name = 'StringLiteral_' + str(addr)
   ret = idc.set_name(addr, name, SN_NOWARN)
   idc.set_cmt(addr, comm, 1)
 
@@ -45,81 +58,46 @@ def SetName(addr, name):
   if ret == 0:
     new_name = name + '_' + str(addr)
     ret = idc.set_name(addr, new_name, SN_NOWARN | SN_NOCHECK)
-
-index = 1
 "
             );
         }
 
-        private static void writeMethods(StreamWriter writer, IEnumerable<TypeInfo> types) {
-            foreach (var type in types.Where(t => t != null)) {
-                writeMethods(writer, type.Name, type.DeclaredConstructors);
-                writeMethods(writer, type.Name, type.DeclaredMethods);
+        private void writeMethods() {
+            foreach (var type in model.Types.Where(t => t != null)) {
+                writeMethods(type.Name, type.DeclaredConstructors);
+                writeMethods(type.Name, type.DeclaredMethods);
             }
         }
 
-        private static void writeMethods(StreamWriter writer, string typeName, IEnumerable<MethodBase> methods) {
+        private void writeMethods(string typeName, IEnumerable<MethodBase> methods) {
             foreach (var method in methods.Where(m => m.VirtualAddress.HasValue)) {
-                writeLines(writer,
-                    $"SetName({method.VirtualAddress.Value.Start.ToAddressString()}, '{typeName}$${method.Name}')"
-                );
+                writeLines($"SetName({method.VirtualAddress.Value.Start.ToAddressString()}, '{typeName}$${method.Name}')");
             }
         }
 
-        private static void writeUsages(StreamWriter writer, Il2CppModel model) {
+        private void writeUsages() {
             foreach (var usage in model.Package.MetadataUsages) {
-                switch (usage.Type) {
-                    case MetadataUsageType.TypeInfo:
-                    case MetadataUsageType.Type:
-                        var type = model.GetTypeFromUsage(usage.SourceIndex);
-                        writeLines(writer,
-                            $"SetName({model.Package.BinaryMetadataUsages[usage.DestinationIndex].ToAddressString()}, 'Class${type.Name}')"
-                        );
-                        break;
-                    case MetadataUsageType.MethodDef:
-                        var method = model.MethodsByDefinitionIndex[usage.SourceIndex];
-                        writeLines(writer,
-                            $"SetName({model.Package.BinaryMetadataUsages[usage.DestinationIndex].ToAddressString()}, 'Method${method.DeclaringType.Name}.{method.Name}')"
-                        );
-                        break;
-                    case MetadataUsageType.FieldInfo:
-                        var field = model.Package.Fields[usage.SourceIndex];
-                        type = model.GetTypeFromUsage(field.typeIndex);
-                        var fieldName = model.Package.Strings[field.nameIndex];
-                        writeLines(writer,
-                            $"SetName({model.Package.BinaryMetadataUsages[usage.DestinationIndex].ToAddressString()}, 'Field${type.Name}.{fieldName}')"
-                        );
-                        break;
-                    case MetadataUsageType.StringLiteral:
-                        // TODO: String literals
-                        break;
-                    case MetadataUsageType.MethodRef:
-                        var methodSpec = model.Package.MethodSpecs[usage.SourceIndex];
-                        method = model.MethodsByDefinitionIndex[methodSpec.methodDefinitionIndex];
-                        type = method.DeclaringType;
-                        writeLines(writer,
-                            $"SetName({model.Package.BinaryMetadataUsages[usage.DestinationIndex].ToAddressString()}, 'Method${type.Name}.{method.Name}')"
-                        );
-                        break;
-                    default:
-                        break;
-                }
+                var escapedName = model.GetMetadataUsageName(usage).ToEscapedString();
+                var address = model.Package.BinaryMetadataUsages[usage.DestinationIndex];
+
+                if (usage.Type != MetadataUsageType.StringLiteral)
+                    writeLines($"SetName({address.ToAddressString()}, '{usagePrefixes[usage.Type]}${escapedName}')");
+                else
+                    writeLines($"SetString({address.ToAddressString()}, r'{escapedName}')");
             }
         }
 
-        private static void writeSectionHeader(StreamWriter writer, string sectionName) {
-            writeLines(writer,
+        private void writeSectionHeader(string sectionName) {
+            writeLines(
                 $"# SECTION: {sectionName}",
                 $"# -----------------------------"
             );
         }
 
-        private static void writeLines(StreamWriter writer, params string[] lines) {
+        private void writeLines(params string[] lines) {
             foreach (var line in lines) {
                 writer.WriteLine(line);
             }
         }
-
-        #endregion
     }
 }

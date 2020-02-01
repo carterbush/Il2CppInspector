@@ -3,13 +3,17 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Il2CppDumper.Properties;
 using Il2CppInspector.Reflection;
+using Assembly = Il2CppInspector.Reflection.Assembly;
 using CustomAttributeData = Il2CppInspector.Reflection.CustomAttributeData;
 using MethodInfo = Il2CppInspector.Reflection.MethodInfo;
 using TypeInfo = Il2CppInspector.Reflection.TypeInfo;
@@ -55,11 +59,14 @@ namespace Il2CppInspector
             });
         }
 
-        public void WriteFilesByAssembly<TKey>(string outPath, Func<TypeInfo, TKey> orderBy) {
+        public void WriteFilesByAssembly<TKey>(string outPath, Func<TypeInfo, TKey> orderBy, bool separateAttributes) {
             usedAssemblyAttributes.Clear();
             Parallel.ForEach(model.Assemblies, asm => {
                 // Sort namespaces into alphabetical order, then sort types within the namespaces by the specified sort function
-                writeFile($"{outPath}\\{asm.ShortName.Replace(".dll", "")}.cs", asm.DefinedTypes.OrderBy(t => t.Namespace).ThenBy(orderBy));
+               if (writeFile($"{outPath}\\{asm.ShortName.Replace(".dll", "")}.cs", asm.DefinedTypes.OrderBy(t => t.Namespace).ThenBy(orderBy), outputAssemblyAttributes: !separateAttributes)
+                    && separateAttributes) {
+                    File.WriteAllText($"{outPath}\\AssemblyInfo_{asm.ShortName.Replace(".dll", "")}.cs", generateAssemblyInfo(new [] {asm}));
+                }
             });
         }
 
@@ -71,15 +78,95 @@ namespace Il2CppInspector
             });
         }
 
-        public void WriteFilesByClassTree(string outPath) {
+        public HashSet<Assembly> WriteFilesByClassTree(string outPath, bool separateAttributes) {
             usedAssemblyAttributes.Clear();
-            Parallel.ForEach(model.Assemblies.SelectMany(x => x.DefinedTypes), type => {
-                writeFile($"{outPath}\\{type.Assembly.ShortName.Replace(".dll", "")}\\" + (type.Namespace + (type.Namespace.Length > 0 ? "." : "") + Regex.Replace(type.Name, "`[0-9]", ""))
-                          .Replace('.', '\\') + ".cs", new[] {type});
-            });
+            var usedAssemblies = new HashSet<Assembly>();
+
+            // Each thread tracks its own list of used assemblies and they are merged as each thread completes
+            Parallel.ForEach(model.Assemblies.SelectMany(x => x.DefinedTypes),
+                () => new HashSet<Assembly>(),
+                (type, _, used) => {
+                    if (writeFile($"{outPath}\\{type.Assembly.ShortName.Replace(".dll", "")}\\" + (type.Namespace + (type.Namespace.Length > 0 ? "." : "") + Regex.Replace(type.Name, "`[0-9]", ""))
+                                  .Replace('.', '\\') + ".cs", new[] {type}, outputAssemblyAttributes: !separateAttributes))
+                        used.Add(type.Assembly);
+                    return used;
+                },
+                usedPartition => usedAssemblies.UnionWith(usedPartition)
+            );
+
+            if (separateAttributes && usedAssemblies.Any())
+                foreach (var asm in usedAssemblies)
+                    File.WriteAllText($"{outPath}\\{asm.ShortName.Replace(".dll", "")}\\AssemblyInfo.cs", generateAssemblyInfo(new [] {asm}));
+
+            return usedAssemblies;
         }
 
-        private void writeFile(string outFile, IEnumerable<TypeInfo> types, bool useNamespaceSyntax = true) {
+        // Create a Visual Studio solution
+        public void WriteSolution(string outPath, string unityPath, string unityAssembliesPath) {
+            // Required settings
+            MustCompile = true;
+
+            // Output source files in tree format with separate assembly attributes
+            var assemblies = WriteFilesByClassTree(outPath, true);
+
+            // Per-project (per-assembly) solution definition and configuration
+            var slnProjectDefs = new StringBuilder();
+            var slnProjectConfigs = new StringBuilder();
+
+            foreach (var asm in assemblies) {
+                var guid = Guid.NewGuid();
+                var name = asm.ShortName.Replace(".dll", "");
+                var csProjFile = $"{name}\\{name}.csproj";
+
+                var def = Resources.SlnProjectDefinition
+                    .Replace("%PROJECTGUID%", guid.ToString())
+                    .Replace("%PROJECTNAME%", name)
+                    .Replace("%CSPROJRELATIVEPATH%", csProjFile);
+
+                slnProjectDefs.Append(def);
+
+                var config = Resources.SlnProjectConfiguration
+                    .Replace("%PROJECTGUID%", guid.ToString());
+
+                slnProjectConfigs.Append(config);
+
+                // Determine all the assemblies on which this assembly depends
+                var dependencyTypes = asm.DefinedTypes.SelectMany(t => t.GetAllTypeReferences())
+                    .Union(asm.CustomAttributes.SelectMany(a => a.AttributeType.GetAllTypeReferences()))
+                    .Distinct();
+                var dependencyAssemblies = dependencyTypes.Select(t => t.Assembly).Distinct()
+                    .Except(new[] {asm});
+                
+                // Only create project references to those assemblies actually output in our solution
+                dependencyAssemblies = dependencyAssemblies.Intersect(assemblies);
+
+                var referenceXml = string.Concat(dependencyAssemblies.Select(
+                        a => $@"    <ProjectReference Include=""..\{a.ShortName.Replace(".dll", "")}\{a.ShortName.Replace(".dll", "")}.csproj""/>" + "\n"
+                ));
+
+                // Create a .csproj file using the project Guid
+                var csProj = Resources.CsProjTemplate
+                    .Replace("%PROJECTGUID%", guid.ToString())
+                    .Replace("%ASSEMBLYNAME%", name)
+                    .Replace("%UNITYPATH%", unityPath)
+                    .Replace("%SCRIPTASSEMBLIES%", unityAssembliesPath)
+                    .Replace("%PROJECTREFERENCES%", referenceXml);
+
+                File.WriteAllText($"{outPath}\\{csProjFile}", csProj);
+            }
+
+            // Merge everything into .sln file
+            var sln = Resources.SlnTemplate
+                .Replace("%PROJECTDEFINITIONS%", slnProjectDefs.ToString())
+                .Replace("%PROJECTCONFIGURATIONS%", slnProjectConfigs.ToString());
+
+            var filename = Path.GetFileName(outPath);
+            if (filename == "")
+                filename = "Il2CppProject";
+            File.WriteAllText($"{outPath}\\{filename}.sln", sln);
+        }
+
+        private bool writeFile(string outFile, IEnumerable<TypeInfo> types, bool useNamespaceSyntax = true, bool outputAssemblyAttributes = true) {
 
             var nsRefs = new HashSet<string>();
             var code = new StringBuilder();
@@ -98,13 +185,23 @@ namespace Il2CppInspector
             var assemblies = types.Select(t => t.Assembly).Distinct();
 
             // Add assembly attribute namespaces to reference list
-            nsRefs.UnionWith(assemblies.SelectMany(a => a.CustomAttributes).Select(a => a.AttributeType.Namespace));
+            if (outputAssemblyAttributes)
+                nsRefs.UnionWith(assemblies.SelectMany(a => a.CustomAttributes).Select(a => a.AttributeType.Namespace));
 
             // Generate each type
             foreach (var type in types) {
 
                 // Skip namespace and any children if requested
                 if (ExcludedNamespaces?.Any(x => x == type.Namespace || type.Namespace.StartsWith(x + ".")) ?? false)
+                    continue;
+
+                // Don't output global::Locale if desired
+                if (MustCompile
+                    && type.Name == "Locale" && type.Namespace == string.Empty
+                    && type.BaseType.FullName == "System.Object"
+                    && type.IsClass && type.IsSealed && type.IsNotPublic && !type.ContainsGenericParameters
+                    && type.DeclaredMembers.Count == type.DeclaredMethods.Count
+                    && type.GetMethods("GetText").Length == type.DeclaredMethods.Count)
                     continue;
 
                 // Assembly.DefinedTypes returns nested types in the assembly by design - ignore them
@@ -147,7 +244,7 @@ namespace Il2CppInspector
 
             // Stop if nothing to output
             if (!usedTypes.Any())
-                return;
+                return false;
 
             // Close namespace
             if (useNamespaceSyntax && !string.IsNullOrEmpty(nsContext))
@@ -187,7 +284,7 @@ namespace Il2CppInspector
                         writer.Write("\n");
 
                     // Output assembly information and attributes
-                    writer.Write(generateAssemblyInfo(assemblies, nsRefs) + "\n\n");
+                    writer.Write(generateAssemblyInfo(assemblies, nsRefs, outputAssemblyAttributes) + "\n\n");
 
                     // Output type definitions
                     writer.Write(code);
@@ -203,25 +300,28 @@ namespace Il2CppInspector
                     System.Threading.Thread.Sleep(100);
                 }
             } while (!fileWritten);
+
+            return true;
         }
 
-        private string generateAssemblyInfo(IEnumerable<Reflection.Assembly> assemblies, IEnumerable<string> namespaces) {
+        private string generateAssemblyInfo(IEnumerable<Reflection.Assembly> assemblies, IEnumerable<string> namespaces = null, bool outputAssemblyAttributes = true) {
             var text = new StringBuilder();
 
             foreach (var asm in assemblies) {
                 text.Append($"// Image {asm.Index}: {asm.ShortName} - Assembly: {asm.FullName} - Types {asm.ImageDefinition.typeStart}-{asm.ImageDefinition.typeStart + asm.ImageDefinition.typeCount - 1}\n");
 
                 // Assembly-level attributes
-                lock (usedAssemblyAttributesLock) {
-                    text.Append(asm.CustomAttributes.Where(a => a.AttributeType.FullName != ExtAttribute)
-                        .Except(usedAssemblyAttributes ?? new HashSet<CustomAttributeData>())
-                        .OrderBy(a => a.AttributeType.Name)
-                        .ToString(new Scope { Current = null, Namespaces = namespaces }, attributePrefix: "assembly: ", emitPointer: !SuppressMetadata, mustCompile: MustCompile));
-                    if (asm.CustomAttributes.Any())
-                        text.Append("\n");
+                if (outputAssemblyAttributes)
+                    lock (usedAssemblyAttributesLock) {
+                        text.Append(asm.CustomAttributes.Where(a => a.AttributeType.FullName != ExtAttribute)
+                            .Except(usedAssemblyAttributes ?? new HashSet<CustomAttributeData>())
+                            .OrderBy(a => a.AttributeType.Name)
+                            .ToString(new Scope { Current = null, Namespaces = namespaces ?? new List<string>() }, attributePrefix: "assembly: ", emitPointer: !SuppressMetadata, mustCompile: MustCompile));
+                        if (asm.CustomAttributes.Any())
+                            text.Append("\n");
 
-                    usedAssemblyAttributes.UnionWith(asm.CustomAttributes);
-                }
+                        usedAssemblyAttributes.UnionWith(asm.CustomAttributes);
+                    }
             }
             return text.ToString().TrimEnd();
         }
@@ -455,12 +555,11 @@ namespace Il2CppInspector
                 sb.Append($" // TypeDefIndex: {type.Index}");
             sb.Append("\n");
 
-            if (type.GenericTypeParameters != null)
-                foreach (var gp in type.GenericTypeParameters) {
-                    var constraint = gp.GetTypeConstraintsString(scope);
-                    if (constraint != string.Empty)
-                        sb.Append($"{prefix}\t{constraint}\n");
-                }
+            foreach (var gp in type.GetGenericArguments()) {
+                var constraint = gp.GetTypeConstraintsString(scope);
+                if (constraint != string.Empty)
+                    sb.Append($"{prefix}\t{constraint}\n");
+            }
 
             sb.Append(prefix + "{\n");
 

@@ -1,15 +1,17 @@
 ﻿/*
     Copyright 2017 Perfare - https://github.com/Perfare/Il2CppDumper
-    Copyright 2017-2019 Katy Coe - http://www.hearthcode.org - http://www.djkaty.com
+    Copyright 2017-2020 Katy Coe - http://www.hearthcode.org - http://www.djkaty.com
 
     All rights reserved.
 */
 
 using System;
 using System.Collections.Generic;
+using System.Dynamic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using NoisyCowStudios.Bin2Object;
 
 namespace Il2CppInspector
@@ -34,12 +36,14 @@ namespace Il2CppInspector
         public Il2CppInterfaceOffsetPair[] InterfaceOffsets { get; }
         public Il2CppMetadataUsageList[] MetadataUsageLists { get; }
         public Il2CppMetadataUsagePair[] MetadataUsagePairs { get; }
+        public Il2CppFieldRef[] FieldRefs { get; }
 
         public int[] InterfaceUsageIndices { get; }
         public int[] NestedTypeIndices { get; }
         public int[] AttributeTypeIndices { get; }
         public int[] GenericConstraintIndices { get; }
         public uint[] VTableMethodIndices { get; }
+        public string[] StringLiterals { get; }
 
         public Dictionary<int, string> Strings { get; } = new Dictionary<int, string>();
         public List<MetadataUsage> MetadataUsages { get; } = new List<MetadataUsage>();
@@ -124,17 +128,24 @@ namespace Il2CppInspector
             if (Version >= 19) {
                 MetadataUsageLists = ReadArray<Il2CppMetadataUsageList>(Header.metadataUsageListsOffset, Header.metadataUsageListsCount / Sizeof(typeof(Il2CppMetadataUsageList)));
                 MetadataUsagePairs = ReadArray<Il2CppMetadataUsagePair>(Header.metadataUsagePairsOffset, Header.metadataUsagePairsCount / Sizeof(typeof(Il2CppMetadataUsagePair)));
-                MetadataUsages = buildMetadataUsages();
+                FieldRefs = ReadArray<Il2CppFieldRef>(Header.fieldRefsOffset, Header.fieldRefsCount / Sizeof(typeof(Il2CppFieldRef)));
             }
             if (Version >= 21) {
                 AttributeTypeIndices = ReadArray<int>(Header.attributeTypesOffset, Header.attributeTypesCount / sizeof(int));
                 AttributeTypeRanges = ReadArray<Il2CppCustomAttributeTypeRange>(Header.attributesInfoOffset, Header.attributesInfoCount / Sizeof(typeof(Il2CppCustomAttributeTypeRange)));
             }
 
-            // Get all string literals
+            // Get all metadata string literals
             Position = Header.stringOffset;
             while (Position < Header.stringOffset + Header.stringCount)
                 Strings.Add((int)Position - Header.stringOffset, ReadNullTerminatedString());
+
+            // Get all managed code string literals
+            var stringLiteralList = ReadArray<Il2CppStringLiteral>(Header.stringLiteralOffset, Header.stringLiteralCount / Sizeof(typeof(Il2CppStringLiteral)));
+
+            StringLiterals = new string[stringLiteralList.Length];
+            for (var i = 0; i < stringLiteralList.Length; i++)
+                StringLiterals[i] = ReadFixedLengthString(Header.stringLiteralDataOffset + stringLiteralList[i].dataIndex, stringLiteralList[i].length);
         }
 
         private List<MetadataUsage> buildMetadataUsages()

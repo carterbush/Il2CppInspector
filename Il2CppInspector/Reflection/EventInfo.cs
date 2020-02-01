@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright 2017-2019 Katy Coe - http://www.hearthcode.org - http://www.djkaty.com
+    Copyright 2017-2020 Katy Coe - http://www.hearthcode.org - http://www.djkaty.com
 
     All rights reserved.
 */
@@ -28,8 +28,8 @@ namespace Il2CppInspector.Reflection
         public MethodInfo RaiseMethod { get; }
 
         // Event handler delegate type
-        private int eventTypeUsage;
-        public TypeInfo EventHandlerType => Assembly.Model.GetTypeFromUsage(eventTypeUsage, MemberTypes.TypeInfo);
+        private int eventTypeReference;
+        public TypeInfo EventHandlerType => Assembly.Model.TypesByReferenceIndex[eventTypeReference];
 
         // True if the event has a special name
         public bool IsSpecialName => (Attributes & EventAttributes.SpecialName) == EventAttributes.SpecialName;
@@ -42,8 +42,8 @@ namespace Il2CppInspector.Reflection
             Index = eventIndex;
             Name = pkg.Strings[Definition.nameIndex];
 
-            eventTypeUsage = Definition.typeIndex;
-            var eventType = pkg.TypeUsages[eventTypeUsage];
+            eventTypeReference = Definition.typeIndex;
+            var eventType = pkg.TypeReferences[eventTypeReference];
 
             if ((eventType.attrs & Il2CppConstants.FIELD_ATTRIBUTE_SPECIAL_NAME) == Il2CppConstants.FIELD_ATTRIBUTE_SPECIAL_NAME)
                 Attributes |= EventAttributes.SpecialName;

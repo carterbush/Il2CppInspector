@@ -25,10 +25,15 @@ namespace Il2CppInspector
         // Attribute indexes (>=24.1) arranged by customAttributeStart and token
         public Dictionary<int, Dictionary<uint, int>> AttributeIndicesByToken { get; }
 
+        // Merged list of all metadata usage references
+        public List<MetadataUsage> MetadataUsages { get; }
+        public ulong[] BinaryMetadataUsages { get; } // TODO: Make private
+
         // Shortcuts
         public double Version => Metadata.Version;
 
         public Dictionary<int, string> Strings => Metadata.Strings;
+        public string[] StringLiterals => Metadata.StringLiterals;
         public Il2CppTypeDefinition[] TypeDefinitions => Metadata.Types;
         public Il2CppAssemblyDefinition[] Assemblies => Metadata.Assemblies;
         public Il2CppImageDefinition[] Images => Metadata.Images;
@@ -47,10 +52,12 @@ namespace Il2CppInspector
         public int[] NestedTypeIndices => Metadata.NestedTypeIndices;
         public int[] AttributeTypeIndices => Metadata.AttributeTypeIndices;
         public uint[] VTableMethodIndices => Metadata.VTableMethodIndices;
+        public Il2CppFieldRef[] FieldRefs => Metadata.FieldRefs;
         public Dictionary<int, (ulong, object)> FieldDefaultValue { get; } = new Dictionary<int, (ulong, object)>();
         public Dictionary<int, (ulong, object)> ParameterDefaultValue { get; } = new Dictionary<int, (ulong, object)>();
         public List<long> FieldOffsets { get; }
-        public List<Il2CppType> TypeUsages => Binary.Types;
+        public List<Il2CppType> TypeReferences => Binary.TypeReferences;
+        public List<Il2CppGenericInst> GenericInstances => Binary.GenericInstances;
         public Dictionary<string, Il2CppCodeGenModule> Modules => Binary.Modules;
         public ulong[] CustomAttributeGenerators => Binary.CustomAttributeGenerators;
         public Il2CppMethodSpec[] MethodSpecs => Binary.MethodSpecs;
@@ -66,7 +73,7 @@ namespace Il2CppInspector
 
             // Get pointer in binary to default value
             var pValue = Metadata.Header.fieldAndParameterDefaultValueDataOffset + dataIndex;
-            var type = TypeUsages[typeIndex];
+            var typeRef = TypeReferences[typeIndex];
 
             // Default value is null
             if (pValue == 0)
@@ -74,7 +81,7 @@ namespace Il2CppInspector
 
             object value = null;
             Metadata.Position = pValue;
-            switch (type.type) {
+            switch (typeRef.type) {
                 case Il2CppTypeEnum.IL2CPP_TYPE_BOOLEAN:
                     value = Metadata.ReadBoolean();
                     break;
@@ -116,6 +123,27 @@ namespace Il2CppInspector
                     break;
             }
             return ((ulong) pValue, value);
+        }
+
+        private List<MetadataUsage> buildMetadataUsages()
+        {
+            var usages = new Dictionary<uint, MetadataUsage>();
+            foreach (var metadataUsageList in Metadata.MetadataUsageLists)
+            {
+                for (var i = 0; i < metadataUsageList.count; i++)
+                {
+                    var metadataUsagePair = Metadata.MetadataUsagePairs[metadataUsageList.start + i];
+
+                    var encodedType = metadataUsagePair.encodedSourceIndex & 0xE0000000;
+                    var usageType = (MetadataUsageType)(encodedType >> 29);
+
+                    var sourceIndex = metadataUsagePair.encodedSourceIndex & 0x1FFFFFFF;
+                    var destinationIndex = metadataUsagePair.destinationindex;
+
+                    usages.TryAdd(destinationIndex, new MetadataUsage(usageType, (int)sourceIndex, (int)destinationIndex));
+                }
+            }
+            return usages.Values.ToList();
         }
 
         public Il2CppInspector(Il2CppBinary binary, Metadata metadata) {
@@ -189,6 +217,16 @@ namespace Il2CppInspector
                     }
                     AttributeIndicesByToken.Add(image.customAttributeStart, attsByToken);
                 }
+            }
+
+            // Merge all metadata usage references into a single distinct list
+            if (Version >= 19) {
+                MetadataUsages = buildMetadataUsages();
+
+                // Metadata usages (addresses)
+                // Unfortunately the value supplied in MetadataRegistration.matadataUsagesCount seems to be incorrect,
+                // so we have to calculate the correct number of usages above before reading the usage address list from the binary
+                BinaryMetadataUsages = Binary.Image.ReadMappedArray<ulong>(Binary.MetadataRegistration.metadataUsages, MetadataUsages.Count);
             }
         }
 
@@ -265,7 +303,8 @@ namespace Il2CppInspector
                         processors.Add(new Il2CppInspector(binary, metadata));
                     }
                     else {
-                        Console.Error.WriteLine("Could not process IL2CPP image");
+                        Console.Error.WriteLine("Could not process IL2CPP image. This may mean the binary file is packed, encrypted or obfuscated, that the file is not an IL2CPP image or that Il2CppInspector was not able to automatically find the required data.");
+                        Console.Error.WriteLine("Please check the binary file in a disassembler to ensure that it is an unencrypted IL2CPP binary before submitting a bug report!");
                     }
                 }
                 // Unknown architecture
