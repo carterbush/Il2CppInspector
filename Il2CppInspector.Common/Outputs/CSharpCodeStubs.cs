@@ -3,24 +3,22 @@
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using Il2CppDumper.Properties;
+using Il2CppInspector.Properties;
 using Il2CppInspector.Reflection;
 using Assembly = Il2CppInspector.Reflection.Assembly;
 using CustomAttributeData = Il2CppInspector.Reflection.CustomAttributeData;
 using MethodInfo = Il2CppInspector.Reflection.MethodInfo;
 using TypeInfo = Il2CppInspector.Reflection.TypeInfo;
 
-namespace Il2CppInspector
+namespace Il2CppInspector.Outputs
 {
-    public class Il2CppCSharpDumper
+    public class CSharpCodeStubs
     {
         private readonly Il2CppModel model;
 
@@ -42,7 +40,7 @@ namespace Il2CppInspector
         private HashSet<CustomAttributeData> usedAssemblyAttributes = new HashSet<CustomAttributeData>();
         private readonly object usedAssemblyAttributesLock = new object();
 
-        public Il2CppCSharpDumper(Il2CppModel model) => this.model = model;
+        public CSharpCodeStubs(Il2CppModel model) => this.model = model;
 
         public void WriteSingleFile(string outFile) => WriteSingleFile(outFile, t => t.Index);
 
@@ -265,6 +263,10 @@ namespace Il2CppInspector
             if (!string.IsNullOrEmpty(Path.GetDirectoryName(outFile)))
                 Directory.CreateDirectory(Path.GetDirectoryName(outFile));
 
+            // Sanitize leafname (might be class name with invalid characters)
+            var leafname = Regex.Replace(Path.GetFileName(outFile), @"[<>:""\|\?\*]", "_");
+            outFile = Path.GetDirectoryName(outFile) + Path.DirectorySeparatorChar + leafname;
+
             // Create output file
             bool fileWritten = false;
             do {
@@ -467,6 +469,12 @@ namespace Il2CppInspector
             var fields = type.DeclaredFields.Where(f => !f.GetCustomAttributes(CGAttribute).Any());
 
             sb.Clear();
+
+            // Crete a parameterless constructor for every relevant type when making code that compiles to mitigate CS1729 and CS7036
+            if (MustCompile && !type.IsInterface && !(type.IsAbstract && type.IsSealed) && !type.IsValueType
+                && type.DeclaredConstructors.All(c => c.IsStatic || c.DeclaredParameters.Any()))
+                sb.Append($"{prefix}\t{(type.IsAbstract? "protected" : "public")} {type.UnmangledBaseName}() {{}} // Dummy constructor\n");
+
             foreach (var method in type.DeclaredConstructors) {
                 // Attributes
                 sb.Append(method.CustomAttributes.OrderBy(a => a.AttributeType.Name)
@@ -475,28 +483,32 @@ namespace Il2CppInspector
                 sb.Append($"{prefix}\t{method.GetModifierString()}{method.DeclaringType.UnmangledBaseName}{method.GetTypeParametersString(scope)}");
                 sb.Append($"({method.GetParametersString(scope, !SuppressMetadata)})");
 
-                // Class constructor
-                if (method.IsAbstract)
-                    sb.Append(";");
-                else if (!type.IsValueType)
-                    sb.Append(" {}");
-
-                // Struct constructor
-                else {
-                    // Parameterized struct constructors must call the parameterless constructor to create the object
-                    // if the object has any auto-implemented properties
-                    if (type.DeclaredProperties.Any() && method.DeclaredParameters.Any())
-                        sb.Append(" : this()");
-
-                    // Struct construvctors must initialize all fields in the struct
-                    if (fields.Any()) {
-                        var paramNames = method.DeclaredParameters.Select(p => p.Name);
-                        sb.Append(" {\n" + string.Join("\n",
-                                    fields.Select(f => $"{prefix}\t\t{(paramNames.Contains(f.Name) ? "this." : "")}{f.Name} = default;"))
-                                    + $"\n{prefix}\t}}");
-                    } else
+                if (MustCompile) {
+                    // Class constructor
+                    if (method.IsAbstract)
+                        sb.Append(";");
+                    else if (!type.IsValueType)
                         sb.Append(" {}");
-                }
+
+                    // Struct constructor
+                    else {
+                        // Parameterized struct constructors must call the parameterless constructor to create the object
+                        // if the object has any auto-implemented properties
+                        if (type.DeclaredProperties.Any() && method.DeclaredParameters.Any())
+                            sb.Append(" : this()");
+
+                        // Struct construvctors must initialize all fields in the struct
+                        if (fields.Any()) {
+                            var paramNames = method.DeclaredParameters.Select(p => p.Name);
+                            sb.Append(" {\n" + string.Join("\n", fields
+                                            .Where(f => !f.IsStatic && !f.IsLiteral)
+                                            .Select(f => $"{prefix}\t\t{(paramNames.Contains(f.Name) ? "this." : "")}{f.Name} = default;"))
+                                        + $"\n{prefix}\t}}");
+                        } else
+                            sb.Append(" {}");
+                    }
+                } else
+                    sb.Append(";");
 
                 sb.Append((!SuppressMetadata && method.VirtualAddress != null ? $" // {method.VirtualAddress.ToAddressString()}" : "") + "\n");
             }
@@ -543,11 +555,15 @@ namespace Il2CppInspector
 
             sb.Append(prefix + type.GetModifierString());
 
-            var @base = type.ImplementedInterfaces.Select(x => x.GetScopedCSharpName(scope)).ToList();
+            // Inheriting from a base class or implementing an interface using a generic type which contains a nested type parameter
+            // inside the declared class must be referenced from outside the scope of the type being defined
+            var outerScope = new Scope {Current = scope.Current.DeclaringType, Namespaces = scope.Namespaces};
+
+            var @base = type.ImplementedInterfaces.Select(x => x.GetScopedCSharpName(outerScope)).ToList();
             if (type.BaseType != null && type.BaseType.FullName != "System.Object" && type.BaseType.FullName != "System.ValueType" && !type.IsEnum)
-                @base.Insert(0, type.BaseType.GetScopedCSharpName(scope));
+                @base.Insert(0, type.BaseType.GetScopedCSharpName(outerScope));
             if (type.IsEnum && type.GetEnumUnderlyingType().FullName != "System.Int32") // enums derive from int by default
-                @base.Insert(0, type.GetEnumUnderlyingType().GetScopedCSharpName(scope));
+                @base.Insert(0, type.GetEnumUnderlyingType().GetScopedCSharpName(outerScope));
             var baseText = @base.Count > 0 ? " : " + string.Join(", ", @base) : string.Empty;
 
             sb.Append($"{type.CSharpTypeDeclarationName}{baseText}");
@@ -607,35 +623,45 @@ namespace Il2CppInspector
             writer.Append("(" + method.GetParametersString(scope, !SuppressMetadata) + ")");
 
             // Generic type constraints
-            if (method.GenericTypeParameters != null)
-                foreach (var gp in method.GenericTypeParameters) {
-                    var constraint = gp.GetTypeConstraintsString(scope);
-                    if (constraint != string.Empty)
-                        writer.Append($"\n{prefix}\t\t{constraint}");
-                }
+            foreach (var gp in method.GetGenericArguments()) {
+                var constraint = gp.GetTypeConstraintsString(scope);
+                if (constraint != string.Empty)
+                    writer.Append($"\n{prefix}\t\t{constraint}");
+            }
 
             // Body
-            var methodBody = method switch {
-                // Abstract method
-                { IsAbstract: true } => ";",
+            var methodBody = MustCompile? method switch {
+                    // Abstract method
+                    { IsAbstract: true } => ";",
 
-                // Extern method
-                { Attributes: var a } when (a & MethodAttributes.PinvokeImpl) == MethodAttributes.PinvokeImpl => ";",
+                    // Extern method
+                    { Attributes: var a } when (a & MethodAttributes.PinvokeImpl) == MethodAttributes.PinvokeImpl => ";",
 
-                // Method with out parameters
-                { DeclaredParameters: var d } when d.Any(p => p.IsOut) =>
-                    " {\n" + string.Join("\n", d.Where(p => p.IsOut).Select(p => $"{prefix}\t\t{p.Name} = default;"))
-                    + (method.ReturnType.FullName != "System.Void"? $"\n{prefix}\t\treturn default;" : "")
-                    + $"\n{prefix}\t}}",
+                    // Method with out parameters
+                    { DeclaredParameters: var d } when d.Any(p => p.IsOut) =>
+                        " {\n" + string.Join("\n", d.Where(p => p.IsOut).Select(p => $"{prefix}\t\t{p.Name} = default;"))
+                        + (method.ReturnType.FullName != "System.Void"? $"\n{prefix}\t\treturn default;" : "")
+                        + $"\n{prefix}\t}}",
 
-                // No return type
-                { ReturnType: var retType } when retType.FullName == "System.Void" => " {}",
+                    // No return type
+                    { ReturnType: var retType } when retType.FullName == "System.Void" => " {}",
 
-                // Return type
-                _ => " => default;"
-            };
+                    // Ref return type
+                    { ReturnType: var retType } when retType.IsByRef => " => ref _refReturnTypeFor" + method.CSharpName + ";",
+
+                    // Regular return type
+                    _ => " => default;"
+                }
+
+                // Only make a method body if we are trying to compile the output
+                : ";";
 
             writer.Append(methodBody + (!SuppressMetadata && method.VirtualAddress != null ? $" // {method.VirtualAddress.ToAddressString()}" : "") + "\n");
+
+            // Ref return type requires us to invent a field
+            if (MustCompile && method.ReturnType.IsByRef)
+                writer.Append($"{prefix}\tprivate {method.ReturnType.GetScopedCSharpName(scope)} _refReturnTypeFor{method.CSharpName}; // Dummy field\n");
+
             return writer.ToString();
         }
     }

@@ -9,17 +9,18 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using CommandLine;
 using Il2CppInspector.Reflection;
+using Il2CppInspector.Outputs;
 
-namespace Il2CppInspector
+namespace Il2CppInspector.CLI
 {
     public class App
     {
         private class Options
         {
-            [Option('i', "bin", Required = true, HelpText = "IL2CPP binary file input", Default = "libil2cpp.so")]
+            [Option('i', "bin", Required = false, HelpText = "IL2CPP binary file input", Default = "libil2cpp.so")]
             public string BinaryFile { get; set; }
 
-            [Option('m', "metadata", Required = true, HelpText = "IL2CPP metadata file input", Default = "global-metadata.dat")]
+            [Option('m', "metadata", Required = false, HelpText = "IL2CPP metadata file input", Default = "global-metadata.dat")]
             public string MetadataFile { get; set; }
 
             [Option('c', "cs-out", Required = false, HelpText = "C# output file (when using single-file layout) or path (when using per namespace, assembly or class layout)", Default = "types.cs")]
@@ -54,7 +55,7 @@ namespace Il2CppInspector
             [Option('n', "suppress-metadata", Required = false, HelpText = "Diff tidying: suppress method pointers, field offsets and type indices from C# output. Useful for comparing two versions of a binary for changes with a diff tool")]
             public bool SuppressMetadata { get; set; }
 
-            [Option('k', "must-compile", Required = false, HelpText = "Compilation tidying: try really hard to make code that compiles. Suppress generation of code for items with CompilerGenerated attribute. Comment out attributes without parameterless constructors or all-optional constructor arguments. Don't emit add/remove/raise on events. Specify AttributeTargets.All on classes with AttributeUsage attribute. Force auto-properties to have get accessors. Force regular properties to have bodies. Suppress global::Locale classes.")]
+            [Option('k', "must-compile", Required = false, HelpText = "Compilation tidying: try really hard to make code that compiles. Suppress generation of code for items with CompilerGenerated attribute. Comment out attributes without parameterless constructors or all-optional constructor arguments. Don't emit add/remove/raise on events. Specify AttributeTargets.All on classes with AttributeUsage attribute. Force auto-properties to have get accessors. Force regular properties to have bodies. Suppress global::Locale classes. Generate dummy parameterless base constructors and ref return fields.")]
             public bool MustCompile { get; set; }
 
             [Option("separate-attributes", Required = false, HelpText = "Place assembly-level attributes in their own AssemblyInfo.cs files. Only used when layout is per-assembly or tree")]
@@ -163,7 +164,7 @@ namespace Il2CppInspector
 
                 // C# signatures output
                 using (var signaturesDumperTimer = new Benchmark("Generate C# code")) {
-                    var writer = new Il2CppCSharpDumper(model) {
+                    var writer = new CSharpCodeStubs(model) {
                         ExcludedNamespaces = options.ExcludedNamespaces.ToList(),
                         SuppressMetadata = options.SuppressMetadata,
                         MustCompile = options.MustCompile
@@ -215,7 +216,7 @@ namespace Il2CppInspector
 
                 // IDA Python script output
                 using (var scriptDumperTimer = new Benchmark("IDA Python Script Dumper")) {
-                    var idaWriter = new Il2CppIDAScriptDumper(model);
+                    var idaWriter = new IDAPythonScript(model);
                     idaWriter.WriteScriptToFile(options.PythonOutFile);
                 }
             }

@@ -1,6 +1,6 @@
 ﻿/*
     Copyright 2017 Perfare - https://github.com/Perfare/Il2CppDumper
-    Copyright 2017-2019 Katy Coe - http://www.hearthcode.org - http://www.djkaty.com
+    Copyright 2017-2020 Katy Coe - http://www.hearthcode.org - http://www.djkaty.com
 
     All rights reserved.
 */
@@ -20,11 +20,20 @@ namespace Il2CppInspector
         public Il2CppCodeRegistration CodeRegistration { get; protected set; }
         public Il2CppMetadataRegistration MetadataRegistration { get; protected set; }
 
+        // Information for disassembly reverse engineering
+        public ulong CodeRegistrationPointer { get; private set; }
+        public ulong MetadataRegistrationPointer { get; private set; }
+        public ulong RegistrationFunctionPointer { get; private set; }
+        public Dictionary<string, ulong> CodeGenModulePointers { get; } = new Dictionary<string, ulong>();
+
         // Only for <=v24.1
         public ulong[] GlobalMethodPointers { get; set; }
 
         // Only for >=v24.2
         public Dictionary<Il2CppCodeGenModule, ulong[]> ModuleMethodPointers { get; set; } = new Dictionary<Il2CppCodeGenModule, ulong[]>();
+
+        // Only for >=v24.2. In earlier versions, invoker indices are stored in Il2CppMethodDefinition in the metadata file
+        public Dictionary<Il2CppCodeGenModule, int[]> MethodInvokerIndices { get; set; } = new Dictionary<Il2CppCodeGenModule, int[]>();
 
         // NOTE: In versions <21 and earlier releases of v21, use FieldOffsets:
         // global field index => field offset
@@ -40,14 +49,27 @@ namespace Il2CppInspector
         // Generated functions which call constructors on custom attributes
         public ulong[] CustomAttributeGenerators { get; private set; }
 
+        // IL2CPP-generated functions which implement MethodBase.Invoke with a unique signature per invoker, defined in Il2CppInvokerTable.cpp
+        // One invoker specifies a return type and argument list. Multiple methods with the same signature can be invoked with the same invoker
+        public ulong[] MethodInvokePointers { get; private set; }
+
         // Generic method specs for vtables
         public Il2CppMethodSpec[] MethodSpecs { get; private set; }
 
         // List of run-time concrete generic class and method signatures
         public List<Il2CppGenericInst> GenericInstances { get; private set; }
 
-        // Every defined type
+        // List of constructed generic method function pointers corresponding to each possible method instantiation
+        public Dictionary<Il2CppMethodSpec, ulong> GenericMethodPointers { get; } = new Dictionary<Il2CppMethodSpec, ulong>();
+
+        // List of invoker pointers for concrete generic methods from MethodSpecs (as above)
+        public Dictionary<Il2CppMethodSpec, int> GenericMethodInvokerIndices { get; } = new Dictionary<Il2CppMethodSpec, int>();
+
+        // Every type reference (TypeRef) sorted by index
         public List<Il2CppType> TypeReferences { get; private set; }
+
+        // Every type reference index sorted by virtual address
+        public Dictionary<ulong, int> TypeReferenceIndicesByAddress { get; private set; }
 
         // From v24.2 onwards, this structure is stored for each module (image)
         // One assembly may contain multiple modules
@@ -123,7 +145,8 @@ namespace Il2CppInspector
                 if (loc != 0) {
                     var (code, metadata) = ConsiderCode(subImage, loc);
                     if (code != 0) {
-                        Console.WriteLine("Required structures acquired from code heuristics. Initialization function: 0x{0:X16}", loc + subImage.GlobalOffset);
+                        RegistrationFunctionPointer = loc + subImage.GlobalOffset;
+                        Console.WriteLine("Required structures acquired from code heuristics. Initialization function: 0x{0:X16}", RegistrationFunctionPointer);
                         Configure(subImage, code, metadata); 
                         return true;
                     }
@@ -134,7 +157,10 @@ namespace Il2CppInspector
         }
 
         private void Configure(IFileFormatReader image, ulong codeRegistration, ulong metadataRegistration) {
-            // Output locations
+            // Store locations
+            CodeRegistrationPointer = codeRegistration;
+            MetadataRegistrationPointer = metadataRegistration;
+
             Console.WriteLine("CodeRegistration struct found at 0x{0:X16} (file offset 0x{1:X8})", image.Bits == 32 ? codeRegistration & 0xffff_ffff : codeRegistration, image.MapVATR(codeRegistration));
             Console.WriteLine("MetadataRegistration struct found at 0x{0:X16} (file offset 0x{1:X8})", image.Bits == 32 ? metadataRegistration & 0xffff_ffff : metadataRegistration, image.MapVATR(metadataRegistration));
 
@@ -157,14 +183,21 @@ namespace Il2CppInspector
                 Modules = new Dictionary<string, Il2CppCodeGenModule>();
 
                 // Array of pointers to Il2CppCodeGenModule
+                var codeGenModulePointers = image.ReadMappedArray<ulong>(CodeRegistration.pcodeGenModules, (int) CodeRegistration.codeGenModulesCount);
                 var modules = image.ReadMappedObjectPointerArray<Il2CppCodeGenModule>(CodeRegistration.pcodeGenModules, (int) CodeRegistration.codeGenModulesCount);
 
-                foreach (var module in modules) {
+                foreach (var mp in modules.Zip(codeGenModulePointers, (m, p) => new { Module = m, Pointer = p })) {
+                    var module = mp.Module;
+
                     var name = image.ReadMappedNullTerminatedString(module.moduleName);
                     Modules.Add(name, module);
+                    CodeGenModulePointers.Add(name, mp.Pointer);
 
                     // Read method pointers
                     ModuleMethodPointers.Add(module, image.ReadMappedArray<ulong>(module.methodPointers, (int) module.methodPointerCount));
+
+                    // Read method invoker pointer indices - one per method
+                    MethodInvokerIndices.Add(module, image.ReadMappedArray<int>(module.invokerIndices, (int) module.methodPointerCount));
                 }
             }
 
@@ -190,16 +223,36 @@ namespace Il2CppInspector
                 FieldOffsetPointers = image.ReadMappedWordArray(MetadataRegistration.pfieldOffsets, (int)MetadataRegistration.fieldOffsetsCount);
 
             // Type references (pointer array)
+            var typeRefPointers = image.ReadMappedArray<ulong>(MetadataRegistration.ptypes, (int) MetadataRegistration.typesCount);
+            TypeReferenceIndicesByAddress = typeRefPointers.Zip(Enumerable.Range(0, typeRefPointers.Length), (a, i) => new { a, i }).ToDictionary(x => x.a, x => x.i);
             TypeReferences = image.ReadMappedObjectPointerArray<Il2CppType>(MetadataRegistration.ptypes, (int) MetadataRegistration.typesCount);
 
             // Custom attribute constructors (function pointers)
             CustomAttributeGenerators = image.ReadMappedArray<ulong>(CodeRegistration.customAttributeGenerators, (int) CodeRegistration.customAttributeCount);
+            
+            // Method.Invoke function pointers
+            MethodInvokePointers = image.ReadMappedArray<ulong>(CodeRegistration.invokerPointers, (int) CodeRegistration.invokerPointersCount);
+
+            // TODO: Function pointers as shown below
+            // reversePInvokeWrappers
+            // <=22: delegateWrappersFromManagedToNative, marshalingFunctions;
+            // >=21 <=22: ccwMarhsalingFunctions
+            // >=22: unresolvedVirtualCallPointers
+            // >=23: interopData
 
             // Generic type and method specs (open and closed constructed types)
             MethodSpecs = image.ReadMappedArray<Il2CppMethodSpec>(MetadataRegistration.methodSpecs, (int) MetadataRegistration.methodSpecsCount);
 
             // Concrete generic class and method signatures
             GenericInstances = image.ReadMappedObjectPointerArray<Il2CppGenericInst>(MetadataRegistration.genericInsts, (int) MetadataRegistration.genericInstsCount);
+
+            // Concrete generic method pointers
+            var genericMethodPointers = image.ReadMappedArray<ulong>(CodeRegistration.genericMethodPointers, (int) CodeRegistration.genericMethodPointersCount);
+            var genericMethodTable = image.ReadMappedArray<Il2CppGenericMethodFunctionsDefinitions>(MetadataRegistration.genericMethodTable, (int) MetadataRegistration.genericMethodTableCount);
+            foreach (var tableEntry in genericMethodTable) {
+                GenericMethodPointers.Add(MethodSpecs[tableEntry.genericMethodIndex], genericMethodPointers[tableEntry.indices.methodIndex]);
+                GenericMethodInvokerIndices.Add(MethodSpecs[tableEntry.genericMethodIndex], tableEntry.indices.invokerIndex);
+            }
         }
     }
 }

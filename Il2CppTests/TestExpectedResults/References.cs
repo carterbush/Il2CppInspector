@@ -33,9 +33,9 @@ using System.Runtime.InteropServices;
 // [assembly: TypeLibVersion] // 0x000A4F58-0x000A524C
 
 // Image 1: References.dll - Assembly: References, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null - Types 1810-1812
-// [assembly: CompilationRelaxations] // 0x000A5284-0x000A63B0
-// [assembly: Debuggable] // 0x000A5284-0x000A63B0
-[assembly: RuntimeCompatibility] // 0x000A5284-0x000A63B0
+// [assembly: CompilationRelaxations] // 0x000A5284-0x000A530C
+// [assembly: Debuggable] // 0x000A5284-0x000A530C
+[assembly: RuntimeCompatibility] // 0x000A5284-0x000A530C
 
 internal static class Consts // TypeDefIndex: 100
 {
@@ -97,8 +97,10 @@ namespace Il2CppTests.TestSources
 		public void MethodWithInRefOut(in int a, ref int b, out int c) {
 			c = default;
 		} // 0x005610EC-0x005610F8
-		public ref float MethodWithRefReturnType() => default; // 0x005610F8-0x00561100
-		public ref Test MethodWithGenericAndClassRefs<T>(ref T argGeneric, ref int argValueType, ref Test argClass) => default;
+		public ref float MethodWithRefReturnType() => ref _refReturnTypeForMethodWithRefReturnType; // 0x005610F8-0x00561100
+		private ref float _refReturnTypeForMethodWithRefReturnType; // Dummy field
+		public ref Test MethodWithGenericAndClassRefs<T>(ref T argGeneric, ref int argValueType, ref Test argClass) => ref _refReturnTypeForMethodWithGenericAndClassRefs;
+		private ref Test _refReturnTypeForMethodWithGenericAndClassRefs; // Dummy field
 	}
 
 	[Obsolete] // 0x000A524C-0x000A5284

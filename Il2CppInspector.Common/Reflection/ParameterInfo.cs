@@ -95,6 +95,21 @@ namespace Il2CppInspector.Reflection
             }
         }
 
+        // Create a concrete type parameter from a generic type parameter
+        public ParameterInfo(Il2CppModel model, ParameterInfo generic, TypeInfo concrete) {
+
+            DeclaringMethod = generic.DeclaringMethod;
+            Name = generic.Name;
+            Position = generic.Position;
+            Attributes = generic.Attributes;
+
+            // Search for the concrete type's TypeRef index to store as the parameter type reference index
+            paramTypeReference = Array.IndexOf(model.TypesByReferenceIndex, concrete);
+
+            DefaultValue = generic.DefaultValue;
+            DefaultValueMetadataAddress = generic.DefaultValueMetadataAddress;
+        }
+
         // ref will be handled as part of the type name
         public string GetModifierString() =>
               (IsIn ? "in " : "")

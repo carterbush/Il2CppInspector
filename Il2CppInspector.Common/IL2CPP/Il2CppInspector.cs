@@ -16,8 +16,8 @@ namespace Il2CppInspector
     // Il2CppInspector ties together the binary and metadata files into a congruent API surface
     public class Il2CppInspector
     {
-        private Il2CppBinary Binary { get; }
-        private Metadata Metadata { get; }
+        public Il2CppBinary Binary { get; }
+        public Metadata Metadata { get; }
 
         // All function pointers including attribute initialization functions etc. (start => end)
         public Dictionary<ulong, ulong> FunctionAddresses { get; }
@@ -27,7 +27,6 @@ namespace Il2CppInspector
 
         // Merged list of all metadata usage references
         public List<MetadataUsage> MetadataUsages { get; }
-        public ulong[] BinaryMetadataUsages { get; } // TODO: Make private
 
         // Shortcuts
         public double Version => Metadata.Version;
@@ -47,7 +46,6 @@ namespace Il2CppInspector
         public int[] GenericConstraintIndices => Metadata.GenericConstraintIndices;
         public Il2CppCustomAttributeTypeRange[] AttributeTypeRanges => Metadata.AttributeTypeRanges;
         public Il2CppInterfaceOffsetPair[] InterfaceOffsets => Metadata.InterfaceOffsets;
-        public List<MetadataUsage> MetadataUsages => Metadata.MetadataUsages;
         public int[] InterfaceUsageIndices => Metadata.InterfaceUsageIndices;
         public int[] NestedTypeIndices => Metadata.NestedTypeIndices;
         public int[] AttributeTypeIndices => Metadata.AttributeTypeIndices;
@@ -57,11 +55,14 @@ namespace Il2CppInspector
         public Dictionary<int, (ulong, object)> ParameterDefaultValue { get; } = new Dictionary<int, (ulong, object)>();
         public List<long> FieldOffsets { get; }
         public List<Il2CppType> TypeReferences => Binary.TypeReferences;
+        public Dictionary<ulong, int> TypeReferenceIndicesByAddress => Binary.TypeReferenceIndicesByAddress;
         public List<Il2CppGenericInst> GenericInstances => Binary.GenericInstances;
         public Dictionary<string, Il2CppCodeGenModule> Modules => Binary.Modules;
         public ulong[] CustomAttributeGenerators => Binary.CustomAttributeGenerators;
+        public ulong[] MethodInvokePointers => Binary.MethodInvokePointers;
         public Il2CppMethodSpec[] MethodSpecs => Binary.MethodSpecs;
-        public ulong[] BinaryMetadataUsages => Binary.MetadataUsages;
+        public Dictionary<Il2CppMethodSpec, ulong> GenericMethodPointers => Binary.GenericMethodPointers;
+        public Dictionary<Il2CppMethodSpec, int> GenericMethodInvokerIndices => Binary.GenericMethodInvokerIndices;
 
         // TODO: Finish all file access in the constructor and eliminate the need for this
         public IFileFormatReader BinaryImage => Binary.Image;
@@ -143,6 +144,14 @@ namespace Il2CppInspector
                     usages.TryAdd(destinationIndex, new MetadataUsage(usageType, (int)sourceIndex, (int)destinationIndex));
                 }
             }
+            
+            // Metadata usages (addresses)
+            // Unfortunately the value supplied in MetadataRegistration.matadataUsagesCount seems to be incorrect,
+            // so we have to calculate the correct number of usages above before reading the usage address list from the binary
+            var addresses = Binary.Image.ReadMappedArray<ulong>(Binary.MetadataRegistration.metadataUsages, usages.Count);
+            foreach (var usage in usages.Values)
+                usage.SetAddress(addresses[usage.DestinationIndex]);
+
             return usages.Values.ToList();
         }
 
@@ -195,6 +204,8 @@ namespace Il2CppInspector
                 Binary.ModuleMethodPointers.SelectMany(module => module.Value).ToList();
 
             sortedFunctionPointers.AddRange(CustomAttributeGenerators);
+            sortedFunctionPointers.AddRange(MethodInvokePointers);
+            sortedFunctionPointers.AddRange(GenericMethodPointers.Values);
             sortedFunctionPointers.Sort();
             sortedFunctionPointers = sortedFunctionPointers.Distinct().ToList();
 
@@ -220,16 +231,11 @@ namespace Il2CppInspector
             }
 
             // Merge all metadata usage references into a single distinct list
-            if (Version >= 19) {
+            if (Version >= 19)
                 MetadataUsages = buildMetadataUsages();
-
-                // Metadata usages (addresses)
-                // Unfortunately the value supplied in MetadataRegistration.matadataUsagesCount seems to be incorrect,
-                // so we have to calculate the correct number of usages above before reading the usage address list from the binary
-                BinaryMetadataUsages = Binary.Image.ReadMappedArray<ulong>(Binary.MetadataRegistration.metadataUsages, MetadataUsages.Count);
-            }
         }
 
+        // Get a method pointer if available
         public (ulong Start, ulong End)? GetMethodPointer(Il2CppCodeGenModule module, Il2CppMethodDefinition methodDef) {
             // Find method pointer
             if (methodDef.methodIndex < 0)
@@ -266,6 +272,25 @@ namespace Il2CppInspector
             // Consider the end of the method to be the start of the next method (or zero)
             // The last method end will be wrong but there is no way to calculate it
             return (start & 0xffff_ffff_ffff_fffe, FunctionAddresses[start]);
+        }
+
+        // Get a concrete generic method pointer if available
+        public (ulong Start, ulong End)? GetGenericMethodPointer(Il2CppMethodSpec spec) {
+            if (GenericMethodPointers.TryGetValue(spec, out var start)) {
+                return (start & 0xffff_ffff_ffff_fffe, FunctionAddresses[start]);
+            }
+            return null;
+        }
+
+        // Get a method invoker index from a method definition
+        public int GetInvokerIndex(Il2CppCodeGenModule module, Il2CppMethodDefinition methodDef) {
+            if (Version <= 24.1) {
+                return methodDef.invokerIndex;
+            }
+
+            // Version >= 24.2
+            var methodInModule = (methodDef.token & 0xffffff);
+            return Binary.MethodInvokerIndices[module][methodInModule - 1];
         }
 
         public static List<Il2CppInspector> LoadFromFile(string codeFile, string metadataFile) {
@@ -313,30 +338,6 @@ namespace Il2CppInspector
                 }
             }
             return processors;
-        }
-    }
-
-    public enum MetadataUsageType
-    {
-        TypeInfo = 1,
-        Type = 2,
-        MethodDef = 3,
-        FieldInfo = 4,
-        StringLiteral = 5,
-        MethodRef = 6,
-    }
-
-    public class MetadataUsage
-    {
-        public MetadataUsageType Type { get; }
-        public int SourceIndex { get; }
-        public int DestinationIndex { get; }
-
-        public MetadataUsage(MetadataUsageType type, int sourceIndex, int destinationIndex)
-        {
-            Type = type;
-            SourceIndex = sourceIndex;
-            DestinationIndex = destinationIndex;
         }
     }
 }
